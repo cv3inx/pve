@@ -66,37 +66,20 @@ clear_line() {
 
 print_banner() {
     clear
-    echo -e "${BOLD}${CYAN}"
-    cat << "EOF"
-╔═══════════════════════════════════════════════════════════════════╗
-║                                                                   ║
-║   ██████╗ ██████╗  ██████╗ ██╗  ██╗███╗   ███╗ ██████╗ ██╗  ██╗  ║
-║   ██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝████╗ ████║██╔═══██╗╚██╗██╔╝  ║
-║   ██████╔╝██████╔╝██║   ██║ ╚███╔╝ ██╔████╔██║██║   ██║ ╚███╔╝   ║
-║   ██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗ ██║╚██╔╝██║██║   ██║ ██╔██╗   ║
-║   ██║     ██║  ██║╚██████╔╝██╔╝ ██╗██║ ╚═╝ ██║╚██████╔╝██╔╝ ██╗  ║
-║   ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝  ║
-║                                                                   ║
-║                    DOCKER DEPLOYMENT SCRIPT                       ║
-║                         Version 2.0                               ║
-╚═══════════════════════════════════════════════════════════════════╝
-EOF
-    echo -e "${NC}"
-    echo -e "${DIM}  Ultimate Auto Deploy with Network Configuration${NC}"
+    echo -e "${BOLD}${GREEN}[ PROXMOX DOCKER ]${NC}"
+    echo -e "${DIM}v2.0 | Auto Setup Configuration${NC}"
     echo ""
 }
 
 print_info_box() {
     local title="$1"
     local content="$2"
-    
-    echo -e "${BOLD}${BLUE}┌─────────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${BOLD}${BLUE}│${NC} ${BOLD}${WHITE}${title}${NC}"
-    echo -e "${BOLD}${BLUE}├─────────────────────────────────────────────────────────────────┤${NC}"
-    echo -e "${content}" | while IFS= read -r line; do
-        printf "${BOLD}${BLUE}│${NC} %-63s ${BOLD}${BLUE}│${NC}\n" "$line"
-    done
-    echo -e "${BOLD}${BLUE}└─────────────────────────────────────────────────────────────────┘${NC}"
+
+    echo -e "${BOLD}${BLUE}────────────────────────────${NC}"
+    echo -e "${BOLD}${WHITE} $title ${NC}"
+    echo -e "${BOLD}${BLUE}────────────────────────────${NC}"
+    echo -e "$content"
+    echo -e "${BOLD}${BLUE}────────────────────────────${NC}"
     echo ""
 }
 
@@ -774,21 +757,31 @@ configure_pve_storage() {
     step_success "Proxmox storage configured"
 }
 
+
 finalize_setup() {
     step_start "Finalizing setup"
-    
-    docker exec ${CONTAINER_NAME} bash -c '
-        # Clean up
-        apt-get autoremove -y -qq 2>&1 > /dev/null
-        apt-get clean 2>&1 > /dev/null
-        
-        # Restart key services
-        systemctl restart pveproxy 2>/dev/null || true
-        systemctl restart pvedaemon 2>/dev/null || true
-        
-        echo "✓ Setup finalized"
-    ' &>> "$LOG_FILE"
-    
+
+    docker exec "${CONTAINER_NAME}" bash -c "
+        set -e
+
+        # Clean up package cache quietly
+        apt-get autoremove -y -qq >/dev/null 2>&1 || true
+        apt-get clean >/dev/null 2>&1 || true
+
+        # Restart services only if systemctl exists
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl restart pveproxy 2>/dev/null || true
+            systemctl restart pvedaemon 2>/dev/null || true
+        fi
+
+        # Add interfaces only if not already present
+        for i in \$(ip -o link show | awk -F': ' '{print \$2}' | grep -v lo | sed 's/@.*//'); do
+            grep -q \"iface \$i inet\" /etc/network/interfaces || echo -e \"auto \$i\niface \$i inet manual\n\" >> /etc/network/interfaces
+        done
+
+        echo \"✓ Setup finalized\"
+    " >> \"$LOG_FILE\" 2>&1
+
     step_success "Setup finalized"
 }
 
@@ -797,8 +790,10 @@ finalize_setup() {
 # ============================================================================
 
 show_final_status() {
+
     echo ""
     echo ""
+    docker restart proxmoxve
     
     # Get host IP
     HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
