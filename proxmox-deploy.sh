@@ -1,139 +1,75 @@
 #!/bin/bash
 # ============================================================================
-# PROXMOX VE DOCKER - ULTIMATE AUTO DEPLOY SCRIPT
+# PROXMOX VE DOCKER - AUTO DEPLOY SCRIPT
 # ============================================================================
-# Features:
-# - Custom version support via argument
-# - Auto network configuration (vmbr0)
-# - Silent install with progress bar
-# - Beautiful UI with colors and animations
-# - Complete LXC support
-# - Auto-watch service
+# Quick deploy Proxmox VE in Docker with full LXC support
+# Usage: ./proxmox-deploy.sh [version]
 # ============================================================================
+
+set -e
 
 VERSION="2.0"
-SCRIPT_NAME="proxmox-deploy.sh"
-
-# Default configuration
 CONTAINER_NAME="proxmoxve"
 HOSTNAME="pve"
 PORT="8006"
 DEFAULT_VERSION="9.1.4"
 IMAGE_BASE="rtedpro/proxmox"
 
-# Parse version from argument
 PROXMOX_VERSION="${1:-$DEFAULT_VERSION}"
 IMAGE="${IMAGE_BASE}:${PROXMOX_VERSION}"
 
-# Colors and styling
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-MAGENTA='\033[0;35m'
-WHITE='\033[1;37m'
 NC='\033[0m'
 BOLD='\033[1m'
 DIM='\033[2m'
 
-# Symbols
-CHECK="${GREEN}✓${NC}"
-CROSS="${RED}✗${NC}"
-ARROW="${CYAN}➜${NC}"
-WARN="${YELLOW}⚠${NC}"
-INFO="${BLUE}ℹ${NC}"
-ROCKET="${MAGENTA}🚀${NC}"
-GEAR="${CYAN}⚙${NC}"
-PACKAGE="${YELLOW}📦${NC}"
-NETWORK="${BLUE}🌐${NC}"
-SHIELD="${GREEN}🛡${NC}"
-
-# Progress tracking
+# Progress
 TOTAL_STEPS=13
 CURRENT_STEP=0
-
-# Log file
 LOG_FILE="/tmp/proxmox-deploy-$(date +%Y%m%d-%H%M%S).log"
 
 # ============================================================================
 # UI FUNCTIONS
 # ============================================================================
 
-clear_line() {
-    echo -ne "\033[2K\r"
-}
+clear_line() { echo -ne "\033[2K\r"; }
 
-print_banner() {
+print_header() {
     clear
-    echo -e "${BOLD}${GREEN}[ PROXMOX DOCKER ]${NC}"
-    echo -e "${DIM}v2.0 | Auto Setup Configuration${NC}"
-    echo ""
-}
-
-print_info_box() {
-    local title="$1"
-    local content="$2"
-
-    echo -e "${BOLD}${BLUE}────────────────────────────${NC}"
-    echo -e "${BOLD}${WHITE} $title ${NC}"
-    echo -e "${BOLD}${BLUE}────────────────────────────${NC}"
-    echo -e "$content"
-    echo -e "${BOLD}${BLUE}────────────────────────────${NC}"
+    echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}${GREEN}  PROXMOX VE DOCKER DEPLOYMENT${NC}"
+    echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
 
 progress_bar() {
-    local current=$1
-    local total=$2
-    local message="$3"
-    
-    # Hitung persentase
+    local current=$1 total=$2 message="$3"
     local percent=$((current * 100 / total))
-    # Skala 25 kotak supaya tidak kepanjangan di layar HP/Terminal kecil
-    local filled=$((percent / 4))
-    local empty=$((25 - filled))
-    
-    # Gunakan looping atau printf dengan default value untuk cegah error 0
+    local filled=$((percent / 4)) empty=$((25 - filled))
     local bar_filled=$(printf "%${filled}s" | tr ' ' '█')
     local bar_empty=$(printf "%${empty}s" | tr ' ' '░')
-    
-    # Cetak ke satu baris (\r untuk return ke awal baris tanpa clear layar terus-menerus)
-    printf "\r${BOLD}${CYAN}[%-s%-s] %d%%${NC} %s" "$bar_filled" "$bar_empty" "$percent" "$message"
+    printf "\r${BOLD}[%-s%-s] %3d%%${NC} %s" "$bar_filled" "$bar_empty" "$percent" "$message"
 }
-
 
 step_start() {
     CURRENT_STEP=$((CURRENT_STEP + 1))
-    local message="$1"
-    echo "" >> "$LOG_FILE"
-    echo "=== STEP $CURRENT_STEP: $message ===" >> "$LOG_FILE"
-    progress_bar $CURRENT_STEP $TOTAL_STEPS "$message"
+    echo "=== STEP $CURRENT_STEP: $1 ===" >> "$LOG_FILE"
+    progress_bar $CURRENT_STEP $TOTAL_STEPS "$1"
 }
 
-step_success() {
-    local message="$1"
-    clear_line
-    echo -e "${CHECK} ${GREEN}${message}${NC}"
-}
-
-step_error() {
-    local message="$1"
-    clear_line
-    echo -e "${CROSS} ${RED}${message}${NC}"
-}
-
-step_info() {
-    local message="$1"
-    echo -e "${DIM}  ${INFO} ${message}${NC}"
-}
+step_done() { clear_line; echo -e "${GREEN}✓${NC} ${1}"; }
+step_info() { echo -e "${DIM}  ├─ ${1}${NC}"; }
+step_error() { clear_line; echo -e "${RED}✗${NC} ${1}"; }
 
 spinner() {
-    local pid=$1
-    local message="$2"
+    local pid=$1 message="$2"
     local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
     local i=0
-    
     while kill -0 $pid 2>/dev/null; do
         i=$(((i + 1) % 10))
         clear_line
@@ -144,132 +80,70 @@ spinner() {
 }
 
 # ============================================================================
-# VALIDATION FUNCTIONS
+# SYSTEM CHECK
 # ============================================================================
 
 fix_inotify_limits() {
-    step_start "Checking inotify limits"
+    step_start "Checking system limits"
     
     local current_events=$(sysctl -n fs.inotify.max_queued_events 2>/dev/null || echo 0)
-    local current_instances=$(sysctl -n fs.inotify.max_user_instances 2>/dev/null || echo 0)
-    local current_watches=$(sysctl -n fs.inotify.max_user_watches 2>/dev/null || echo 0)
-    
     local required_value=1048576
-    local needs_fix=0
     
-    if [ "$current_events" -lt "$required_value" ] || \
-       [ "$current_instances" -lt "$required_value" ] || \
-       [ "$current_watches" -lt "$required_value" ]; then
-        needs_fix=1
-    fi
-    
-    if [ $needs_fix -eq 1 ]; then
-        echo ""
-        echo -e "${WARN} ${YELLOW}Inotify limits too low (systemd requirement)${NC}"
-        echo -e "${INFO} Current values:"
-        echo -e "  ${DIM}max_queued_events  : ${current_events}${NC}"
-        echo -e "  ${DIM}max_user_instances : ${current_instances}${NC}"
-        echo -e "  ${DIM}max_user_watches   : ${current_watches}${NC}"
-        echo ""
-        echo -e "${INFO} ${BOLD}Fixing inotify limits...${NC}"
-        
-        # Try to fix automatically
+    if [ "$current_events" -lt "$required_value" ]; then
         if [ "$EUID" -eq 0 ]; then
-            # Running as root, can fix directly
             sysctl -w fs.inotify.max_queued_events=$required_value &>/dev/null
             sysctl -w fs.inotify.max_user_instances=$required_value &>/dev/null
             sysctl -w fs.inotify.max_user_watches=$required_value &>/dev/null
             
-            # Make permanent
             if ! grep -q "fs.inotify.max_queued_events" /etc/sysctl.conf 2>/dev/null; then
                 cat >> /etc/sysctl.conf << EOF
 
-# Inotify limits for Proxmox/systemd containers
+# Inotify limits for Proxmox/systemd
 fs.inotify.max_queued_events=$required_value
 fs.inotify.max_user_instances=$required_value
 fs.inotify.max_user_watches=$required_value
 EOF
             fi
-            
             sysctl -p &>/dev/null
-            step_success "Inotify limits fixed automatically"
         else
-            # Not root, need sudo
-            echo -e "${INFO} Root access required to fix inotify limits"
-            echo ""
+            sudo sysctl -w fs.inotify.max_queued_events=$required_value &>/dev/null
+            sudo sysctl -w fs.inotify.max_user_instances=$required_value &>/dev/null
+            sudo sysctl -w fs.inotify.max_user_watches=$required_value &>/dev/null
             
-            if command -v sudo &>/dev/null; then
-                echo -e "${ARROW} Attempting to fix with sudo..."
-                
-                sudo sysctl -w fs.inotify.max_queued_events=$required_value
-                sudo sysctl -w fs.inotify.max_user_instances=$required_value
-                sudo sysctl -w fs.inotify.max_user_watches=$required_value
-                
-                # Make permanent
-                if ! sudo grep -q "fs.inotify.max_queued_events" /etc/sysctl.conf 2>/dev/null; then
-                    echo "" | sudo tee -a /etc/sysctl.conf >/dev/null
-                    echo "# Inotify limits for Proxmox/systemd containers" | sudo tee -a /etc/sysctl.conf >/dev/null
-                    echo "fs.inotify.max_queued_events=$required_value" | sudo tee -a /etc/sysctl.conf >/dev/null
-                    echo "fs.inotify.max_user_instances=$required_value" | sudo tee -a /etc/sysctl.conf >/dev/null
-                    echo "fs.inotify.max_user_watches=$required_value" | sudo tee -a /etc/sysctl.conf >/dev/null
-                fi
-                
-                sudo sysctl -p &>/dev/null
-                
-                if [ $? -eq 0 ]; then
-                    step_success "Inotify limits fixed with sudo"
-                else
-                    step_error "Failed to fix inotify limits"
-                    echo ""
-                    echo -e "${INFO} Please run manually:"
-                    echo -e "${DIM}  sudo sysctl -w fs.inotify.max_queued_events=$required_value${NC}"
-                    echo -e "${DIM}  sudo sysctl -w fs.inotify.max_user_instances=$required_value${NC}"
-                    echo -e "${DIM}  sudo sysctl -w fs.inotify.max_user_watches=$required_value${NC}"
-                    exit 1
-                fi
-            else
-                step_error "sudo not available and not running as root"
-                echo ""
-                echo -e "${INFO} Please run as root or install sudo, then run:"
-                echo -e "${DIM}  sysctl -w fs.inotify.max_queued_events=$required_value${NC}"
-                echo -e "${DIM}  sysctl -w fs.inotify.max_user_instances=$required_value${NC}"
-                echo -e "${DIM}  sysctl -w fs.inotify.max_user_watches=$required_value${NC}"
-                exit 1
+            if ! sudo grep -q "fs.inotify.max_queued_events" /etc/sysctl.conf 2>/dev/null; then
+                echo "" | sudo tee -a /etc/sysctl.conf >/dev/null
+                echo "# Inotify limits for Proxmox/systemd" | sudo tee -a /etc/sysctl.conf >/dev/null
+                echo "fs.inotify.max_queued_events=$required_value" | sudo tee -a /etc/sysctl.conf >/dev/null
+                echo "fs.inotify.max_user_instances=$required_value" | sudo tee -a /etc/sysctl.conf >/dev/null
+                echo "fs.inotify.max_user_watches=$required_value" | sudo tee -a /etc/sysctl.conf >/dev/null
             fi
+            sudo sysctl -p &>/dev/null
         fi
-        
-        step_info "New values: $required_value (persistent)"
-    else
-        step_success "Inotify limits OK"
-        step_info "Values: $current_events / $current_instances / $current_watches"
     fi
+    
+    step_done "System limits configured"
 }
 
 check_requirements() {
     step_start "Checking requirements"
     
-    # Check Docker
     if ! command -v docker &> /dev/null; then
-        step_error "Docker not installed"
-        echo -e "${CROSS} Please install Docker: https://docs.docker.com/get-docker/"
+        step_error "Docker not found"
         exit 1
     fi
     
-    # Check Docker daemon
-    if ! docker ps &> /dev/null; then
+    if ! docker info &> /dev/null; then
         step_error "Docker daemon not running"
         exit 1
     fi
     
-    # Check port availability
     if netstat -tuln 2>/dev/null | grep -q ":${PORT} " || ss -tuln 2>/dev/null | grep -q ":${PORT} "; then
         step_error "Port ${PORT} already in use"
         exit 1
     fi
     
-    step_success "Requirements check passed"
+    step_done "Requirements check passed"
     step_info "Docker version: $(docker --version | cut -d' ' -f3 | tr -d ',')"
-    step_info "Port ${PORT} available"
 }
 
 check_existing_container() {
@@ -277,7 +151,7 @@ check_existing_container() {
     
     if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
         echo ""
-        echo -e "${WARN} ${YELLOW}Container '${CONTAINER_NAME}' already exists${NC}"
+        echo -e "${YELLOW}⚠${NC} Container '${CONTAINER_NAME}' already exists"
         echo ""
         read -p "  Remove and recreate? [y/N]: " -n 1 -r
         echo ""
@@ -285,18 +159,18 @@ check_existing_container() {
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             docker stop ${CONTAINER_NAME} &>/dev/null
             docker rm ${CONTAINER_NAME} &>/dev/null
-            step_success "Removed existing container"
+            step_done "Removed existing container"
         else
             step_error "Deployment cancelled"
             exit 1
         fi
     else
-        step_success "No container conflict"
+        step_done "No container conflict"
     fi
 }
 
 # ============================================================================
-# DEPLOYMENT FUNCTIONS
+# DEPLOYMENT
 # ============================================================================
 
 deploy_container() {
@@ -311,6 +185,8 @@ deploy_container() {
             --cap-add=NET_ADMIN \
             --cap-add=SYS_ADMIN \
             --device=/dev/net/tun \
+            -v /var/lib/docker/volumes/pve:/var/lib/pve \
+            -v /var/lib/docker/volumes/vz:/var/lib/vz \
             ${IMAGE} &>> "$LOG_FILE"
     } &
     
@@ -318,24 +194,20 @@ deploy_container() {
     wait $!
     
     if [ $? -eq 0 ]; then
-        step_success "Container deployed successfully"
+        step_done "Container deployed"
         step_info "Image: ${IMAGE}"
-        step_info "Name: ${CONTAINER_NAME}"
     else
-        step_error "Failed to deploy container"
-        echo -e "${INFO} Check log: ${LOG_FILE}"
+        step_error "Failed to deploy"
         exit 1
     fi
     
-    # Wait for container to be ready
     sleep 3
 }
 
 configure_network() {
-    step_start "Configuring network (vmbr0)"
+    step_start "Configuring network bridge"
     
     docker exec ${CONTAINER_NAME} bash -c '
-        # Create network bridge vmbr0
         cat > /etc/network/interfaces.d/vmbr0 << EOF
 auto vmbr0
 iface vmbr0 inet static
@@ -349,36 +221,29 @@ iface vmbr0 inet static
     post-down iptables -t nat -D POSTROUTING -s 10.10.10.0/24 -o eth0 -j MASQUERADE
 EOF
 
-        # Restart networking
         systemctl restart networking 2>/dev/null || ifup vmbr0 2>/dev/null
         
-        # Enable IP forwarding permanently
         echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
         sysctl -p > /dev/null 2>&1
         
-        # Configure NAT
         iptables -t nat -A POSTROUTING -s 10.10.10.0/24 -o eth0 -j MASQUERADE 2>/dev/null
         
-        # Install iptables-persistent to save rules
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq 2>&1 > /dev/null
         echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
         echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
         apt-get install -y -qq iptables-persistent 2>&1 > /dev/null
-        
-        echo "✓ Network configured"
     ' &>> "$LOG_FILE"
     
-    step_success "Network bridge vmbr0 configured"
+    step_done "Network bridge configured (vmbr0)"
     step_info "Bridge IP: 10.10.10.1/24"
-    step_info "NAT enabled for LXC containers"
+    step_info "NAT enabled"
 }
 
 disable_subscription() {
     step_start "Disabling subscription notice"
     
     docker exec ${CONTAINER_NAME} bash -c '
-        # Backup and patch proxmoxlib.js
         if [ -f /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js ]; then
             cp /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js \
                /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js.bak
@@ -387,16 +252,13 @@ disable_subscription() {
                 /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js
         fi
         
-        # Alternative path for different versions
         if [ -f /usr/share/pve-manager/js/pvemanagerlib.js ]; then
             sed -i.bak "s/data.status !== '\''Active'\''/false/g" \
                 /usr/share/pve-manager/js/pvemanagerlib.js 2>/dev/null
         fi
-        
-        echo "✓ Subscription disabled"
     ' &>> "$LOG_FILE"
     
-    step_success "Subscription notice disabled"
+    step_done "Subscription notice disabled"
 }
 
 update_system() {
@@ -406,10 +268,9 @@ update_system() {
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq 2>&1 > /dev/null
         apt-get upgrade -y -qq 2>&1 > /dev/null
-        echo "✓ System updated"
     ' &>> "$LOG_FILE"
     
-    step_success "System packages updated"
+    step_done "System updated"
 }
 
 install_dependencies() {
@@ -418,26 +279,21 @@ install_dependencies() {
     docker exec ${CONTAINER_NAME} bash -c '
         export DEBIAN_FRONTEND=noninteractive
         
-        # Essential packages
         apt-get install -y -qq \
             curl wget vim nano net-tools iputils-ping dnsutils \
             htop rsync gnupg ca-certificates software-properties-common \
             bridge-utils vlan ifupdown2 2>&1 > /dev/null
         
-        # LXC packages
         apt-get install -y -qq \
             lxc lxcfs lxc-templates debootstrap 2>&1 > /dev/null
         
-        # Network tools
         apt-get install -y -qq \
             iptables iptables-persistent iproute2 \
             tcpdump nmap netcat-openbsd 2>&1 > /dev/null
-        
-        echo "✓ Dependencies installed"
     ' &>> "$LOG_FILE"
     
-    step_success "Dependencies installed"
-    step_info "LXC, networking, and essential tools ready"
+    step_done "Dependencies installed"
+    step_info "LXC, networking, and tools ready"
 }
 
 setup_lxc_support() {
@@ -468,7 +324,7 @@ iptable_nat
 overlay
 EOF
         
-        # Configure LXC default config
+        # LXC default config
         mkdir -p /etc/lxc
         cat > /etc/lxc/default.conf << EOF
 lxc.net.0.type = veth
@@ -476,17 +332,15 @@ lxc.net.0.link = vmbr0
 lxc.net.0.flags = up
 lxc.apparmor.profile = unconfined
 EOF
-        
-        echo "✓ LXC support configured"
     ' &>> "$LOG_FILE"
     
-    step_success "LXC support configured"
+    step_done "LXC support configured"
     step_info "LXCFS patched and running"
     step_info "Kernel modules loaded"
 }
 
 install_lxc_manager() {
-    step_start "Installing LXC auto-manager"
+    step_start "Installing LXC manager"
     
     docker exec ${CONTAINER_NAME} bash -c 'cat > /usr/local/bin/lxc-manager.sh << '\''EOFSCRIPT'\''
 #!/bin/bash
@@ -505,7 +359,7 @@ print_warning() { echo -e "${YELLOW}⚠${NC} $1"; }
 setup_lxc() {
     local CTID=$1
     if [ -z "$CTID" ]; then
-        print_error "CTID tidak diberikan"
+        print_error "CTID required"
         echo "Usage: lxc-manager.sh setup <CTID>"
         exit 1
     fi
@@ -513,7 +367,7 @@ setup_lxc() {
     local CONFIG_FILE="/var/lib/lxc/${CTID}/config"
     
     if [ ! -f "$CONFIG_FILE" ]; then
-        print_error "Config file tidak ditemukan: $CONFIG_FILE"
+        print_error "Config not found: $CONFIG_FILE"
         exit 1
     fi
     
@@ -527,7 +381,6 @@ setup_lxc() {
         echo "lxc.apparmor.profile=unconfined" >> "$CONFIG_FILE"
     fi
     
-    # Ensure network is configured
     if ! grep -q "lxc.net.0.type" "$CONFIG_FILE"; then
         cat >> "$CONFIG_FILE" << EOF
 
@@ -545,14 +398,11 @@ EOF
     sleep 2
     
     if lxc-info -n "$CTID" 2>/dev/null | grep -q "RUNNING"; then
-        print_success "Container ${CTID} berhasil distart"
-        
-        # Show IP if available
+        print_success "Container ${CTID} started"
         local IP=$(lxc-info -n "$CTID" -iH 2>/dev/null | head -1)
         [ -n "$IP" ] && print_info "IP Address: $IP"
     else
-        print_error "Container ${CTID} gagal start"
-        print_info "Coba: lxc-start -n ${CTID} -F"
+        print_error "Container ${CTID} failed to start"
     fi
 }
 
@@ -583,7 +433,6 @@ auto_watch() {
                         echo "lxc.apparmor.profile=unconfined" >> "$CONFIG_FILE"
                     fi
                     
-                    # Add network if missing
                     if ! grep -q "lxc.net.0.type" "$CONFIG_FILE"; then
                         cat >> "$CONFIG_FILE" << EOF
 
@@ -593,17 +442,16 @@ lxc.net.0.flags = up
 EOF
                     fi
                     
-                    print_info "Config updated, starting container..."
+                    print_info "Config updated, starting..."
                     sleep 2
                     
                     lxc-start -n "$CTID" 2>/dev/null
-                    
                     sleep 2
                     
                     if lxc-info -n "$CTID" 2>/dev/null | grep -q "RUNNING"; then
-                        print_success "✓ Container ${CTID} started successfully"
+                        print_success "✓ Container ${CTID} started"
                         local IP=$(lxc-info -n "$CTID" -iH 2>/dev/null | head -1)
-                        [ -n "$IP" ] && print_info "IP Address: $IP"
+                        [ -n "$IP" ] && print_info "IP: $IP"
                     fi
                     
                     echo "$CTID" >> "$WATCH_FILE"
@@ -684,10 +532,10 @@ case "${1:-}" in
         echo "Usage: $0 {setup|setup-all|watch|status} [CTID]"
         echo ""
         echo "Commands:"
-        echo "  setup <CTID>  - Setup specific LXC container"
-        echo "  setup-all     - Setup all LXC containers"
-        echo "  watch         - Auto-watch mode (detect new LXC)"
-        echo "  status        - Show status of all containers"
+        echo "  setup <CTID>  - Setup specific LXC"
+        echo "  setup-all     - Setup all LXC"
+        echo "  watch         - Auto-watch mode"
+        echo "  status        - Show status"
         exit 1
         ;;
 esac
@@ -732,11 +580,11 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable lxc-autostart.service lxc-autowatch.service
-systemctl start lxc-autowatch.service
+systemctl enable lxc-autostart.service lxc-autowatch.service >/dev/null 2>&1
+systemctl start lxc-autowatch.service >/dev/null 2>&1
 ' &>> "$LOG_FILE"
     
-    step_success "LXC auto-manager installed"
+    step_done "LXC manager installed"
     step_info "Auto-watch service started"
 }
 
@@ -744,45 +592,32 @@ configure_pve_storage() {
     step_start "Configuring Proxmox storage"
     
     docker exec ${CONTAINER_NAME} bash -c '
-        # Create storage directories
         mkdir -p /var/lib/vz/{template,images,dump}
         mkdir -p /var/lib/pve
-        
-        # Set permissions
         chmod 755 /var/lib/vz
-        
-        echo "✓ Storage configured"
     ' &>> "$LOG_FILE"
     
-    step_success "Proxmox storage configured"
+    step_done "Proxmox storage configured"
 }
-
 
 finalize_setup() {
     step_start "Finalizing setup"
-
-    docker exec "${CONTAINER_NAME}" bash -c "
-        set -e
-
-        # Clean up package cache quietly
+    
+    docker exec ${CONTAINER_NAME} bash -c '
         apt-get autoremove -y -qq >/dev/null 2>&1 || true
         apt-get clean >/dev/null 2>&1 || true
-
-        # Restart services only if systemctl exists
+        
         if command -v systemctl >/dev/null 2>&1; then
             systemctl restart pveproxy 2>/dev/null || true
             systemctl restart pvedaemon 2>/dev/null || true
         fi
-
-        # Add interfaces only if not already present
-        for i in \$(ip -o link show | awk -F': ' '{print \$2}' | grep -v lo | sed 's/@.*//'); do
-            grep -q \"iface \$i inet\" /etc/network/interfaces || echo -e \"auto \$i\niface \$i inet manual\n\" >> /etc/network/interfaces
+        
+        for i in $(ip -o link show | awk -F": " "{print \$2}" | grep -v lo | sed "s/@.*//"); do
+            grep -q "iface $i inet" /etc/network/interfaces || echo -e "auto $i\niface $i inet manual\n" >> /etc/network/interfaces
         done
-
-        echo \"✓ Setup finalized\"
-    " >> \"$LOG_FILE\" 2>&1
-
-    step_success "Setup finalized"
+    ' &>> "$LOG_FILE"
+    
+    step_done "Setup finalized"
 }
 
 # ============================================================================
@@ -790,121 +625,86 @@ finalize_setup() {
 # ============================================================================
 
 show_final_status() {
-
     echo ""
-    echo ""
-    docker restart proxmoxve
+    docker restart ${CONTAINER_NAME} >/dev/null 2>&1
     
-    # Get host IP
     HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
     [ -z "$HOST_IP" ] && HOST_IP="localhost"
     
-    print_banner
+    print_header
     
-    echo -e "${BOLD}${GREEN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${GREEN}║                   DEPLOYMENT SUCCESSFUL! 🎉                       ║${NC}"
-    echo -e "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${BOLD}${GREEN}✓ DEPLOYMENT SUCCESSFUL${NC}"
     echo ""
     
-    # Access Information
-    print_info_box "🌐 WEB ACCESS" "$(cat <<EOF
-URL (Primary) : https://${HOST_IP}:${PORT}
-URL (Local)   : https://localhost:${PORT}
-Username      : root
-Password      : root
-
-${YELLOW}Note: Accept the SSL warning in your browser${NC}
-EOF
-)"
-    
-    # Configuration Summary
-    print_info_box "⚙️  CONFIGURATION" "$(cat <<EOF
-Proxmox Version : ${PROXMOX_VERSION}
-Container Name  : ${CONTAINER_NAME}
-Hostname        : ${HOSTNAME}
-Network Bridge  : vmbr0 (10.10.10.1/24)
-NAT Enabled     : Yes (for LXC internet access)
-LXC Auto-watch  : Active
-EOF
-)"
-    
-    # Features Enabled
-    print_info_box "✅ FEATURES ENABLED" "$(cat <<EOF
-${CHECK} Subscription notice disabled
-${CHECK} System updated & upgraded
-${CHECK} Network bridge vmbr0 configured
-${CHECK} NAT/Masquerading enabled
-${CHECK} LXC support fully configured
-${CHECK} Auto-detect new LXC containers
-${CHECK} Auto-setup & auto-start LXC
-${CHECK} All dependencies installed
-EOF
-)"
-    
-    # LXC Information
-    print_info_box "🐳 LXC USAGE" "$(cat <<EOF
-Creating LXC:
-  1. Open Proxmox Web UI
-  2. Click 'Create CT'
-  3. Choose template & resources
-  4. Network: Bridge=vmbr0, Use DHCP
-  5. Done! Auto-watch will handle the rest
-
-Manual Commands (if needed):
-  Setup LXC    : docker exec ${CONTAINER_NAME} lxc-manager.sh setup <ID>
-  Setup All    : docker exec ${CONTAINER_NAME} lxc-manager.sh setup-all
-  Check Status : docker exec ${CONTAINER_NAME} lxc-manager.sh status
-EOF
-)"
-    
-    # Useful Commands
-    print_info_box "📋 USEFUL COMMANDS" "$(cat <<EOF
-Container Shell  : docker exec -it ${CONTAINER_NAME} bash
-View Logs        : docker logs ${CONTAINER_NAME}
-Watch Auto-detect: docker exec ${CONTAINER_NAME} journalctl -u lxc-autowatch -f
-Stop Container   : docker stop ${CONTAINER_NAME}
-Start Container  : docker start ${CONTAINER_NAME}
-Restart Container: docker restart ${CONTAINER_NAME}
-EOF
-)"
-    
-    echo -e "${DIM}Deployment log saved to: ${LOG_FILE}${NC}"
+    echo -e "${BOLD}WEB ACCESS${NC}"
+    echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  URL      : ${CYAN}https://${HOST_IP}:${PORT}${NC}"
+    echo -e "  Username : ${CYAN}root${NC}"
+    echo -e "  Password : ${CYAN}root${NC}"
+    echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo -e "${BOLD}${CYAN}Happy Proxmoxing! 🚀${NC}"
+    
+    echo -e "${BOLD}CONFIGURATION${NC}"
+    echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  Version        : ${CYAN}${PROXMOX_VERSION}${NC}"
+    echo -e "  Container      : ${CYAN}${CONTAINER_NAME}${NC}"
+    echo -e "  Network Bridge : ${CYAN}vmbr0 (10.10.10.1/24)${NC}"
+    echo -e "  NAT Enabled    : ${GREEN}Yes${NC}"
+    echo -e "  LXC Auto-watch : ${GREEN}Active${NC}"
+    echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    
+    echo -e "${BOLD}LXC USAGE${NC}"
+    echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  1. Open Web UI → Create CT"
+    echo -e "  2. Network: Bridge=vmbr0, Use DHCP"
+    echo -e "  3. Auto-watch will configure automatically"
+    echo ""
+    echo -e "  Manual commands:"
+    echo -e "  ${DIM}docker exec ${CONTAINER_NAME} lxc-manager.sh setup <ID>${NC}"
+    echo -e "  ${DIM}docker exec ${CONTAINER_NAME} lxc-manager.sh status${NC}"
+    echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    
+    echo -e "${BOLD}USEFUL COMMANDS${NC}"
+    echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  Shell    : ${CYAN}docker exec -it ${CONTAINER_NAME} bash${NC}"
+    echo -e "  Logs     : ${CYAN}docker logs ${CONTAINER_NAME}${NC}"
+    echo -e "  Restart  : ${CYAN}docker restart ${CONTAINER_NAME}${NC}"
+    echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    
+    echo -e "${DIM}Log: ${LOG_FILE}${NC}"
     echo ""
 }
 
 # ============================================================================
-# MAIN EXECUTION
+# MAIN
 # ============================================================================
 
 main() {
-    # Initial banner
-    print_banner
+    print_header
     
-    echo -e "${INFO} ${BOLD}Deployment Configuration${NC}"
+    echo -e "${BOLD}DEPLOYMENT INFO${NC}"
     echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  Container    : ${CYAN}${CONTAINER_NAME}${NC}"
-    echo -e "  Hostname     : ${CYAN}${HOSTNAME}${NC}"
-    echo -e "  Port         : ${CYAN}${PORT}${NC}"
-    echo -e "  Version      : ${CYAN}${PROXMOX_VERSION}${NC}"
-    echo -e "  Image        : ${CYAN}${IMAGE}${NC}"
+    echo -e "  Container : ${CYAN}${CONTAINER_NAME}${NC}"
+    echo -e "  Version   : ${CYAN}${PROXMOX_VERSION}${NC}"
+    echo -e "  Port      : ${CYAN}${PORT}${NC}"
+    echo -e "  Image     : ${CYAN}${IMAGE}${NC}"
     echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     
-    read -p "  Continue with deployment? [Y/n]: " -n 1 -r
+    read -p "Continue? [Y/n]: " -n 1 -r
     echo ""
     
     if [[ ! $REPLY =~ ^[Yy]$ ]] && [[ -n $REPLY ]]; then
-        echo -e "${CROSS} Deployment cancelled"
+        echo -e "${RED}✗${NC} Cancelled"
         exit 0
     fi
     
     echo ""
-    echo -e "${INFO} ${BOLD}Starting deployment...${NC}"
-    echo ""
     
-    # Execute deployment steps
+    # Execute deployment
     fix_inotify_limits
     check_requirements
     check_existing_container
@@ -918,27 +718,17 @@ main() {
     configure_pve_storage
     finalize_setup
     
-    # Progress complete
-    progress_bar $TOTAL_STEPS $TOTAL_STEPS "Deployment complete!"
+    progress_bar $TOTAL_STEPS $TOTAL_STEPS "Complete!"
     echo ""
     
-    # Show final status
     sleep 1
     show_final_status
 }
 
 # ============================================================================
-# SCRIPT START
+# HELP
 # ============================================================================
 
-# Check if running with proper permissions
-if [ "$EUID" -eq 0 ]; then 
-    echo -e "${WARN} ${YELLOW}Warning: Running as root is not required${NC}"
-    echo -e "${INFO} Script will use your current Docker permissions"
-    echo ""
-fi
-
-# Show usage if --help
 if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
     cat << EOF
 ${BOLD}Proxmox VE Docker Deployment Script${NC}
@@ -946,32 +736,35 @@ ${BOLD}Proxmox VE Docker Deployment Script${NC}
 ${BOLD}USAGE:${NC}
   $0 [VERSION]
 
-${BOLD}ARGUMENTS:${NC}
-  VERSION    Proxmox version to deploy (default: ${DEFAULT_VERSION})
-
 ${BOLD}EXAMPLES:${NC}
-  $0              Deploy Proxmox ${DEFAULT_VERSION}
-  $0 9.1.4        Deploy Proxmox 9.1.4
-  $0 8.4.1        Deploy Proxmox 8.4.1
+  $0              # Deploy Proxmox ${DEFAULT_VERSION}
+  $0 9.1.4        # Deploy specific version
 
 ${BOLD}FEATURES:${NC}
-  ${CHECK} Custom version support
-  ${CHECK} Auto network configuration (vmbr0)
-  ${CHECK} Silent install with progress bar
-  ${CHECK} Complete LXC support
-  ${CHECK} Auto-detect & auto-start LXC
-  ${CHECK} Beautiful UI
+  • Custom version support
+  • Auto network configuration (vmbr0)
+  • Complete LXC support with auto-watch
+  • LXCFS patching for nested containers
+  • Kernel modules auto-loading
+  • NAT/Masquerading for internet access
+  • iptables-persistent for rules persistence
+  • Subscription notice disabled
 
 ${BOLD}REQUIREMENTS:${NC}
-  - Docker installed and running
-  - Port ${PORT} available
-  - Privileged container support
+  • Docker installed and running
+  • Port ${PORT} available
+  • Root/sudo access for inotify limits
+
+${BOLD}LXC FEATURES:${NC}
+  • Auto-detect new LXC containers
+  • Auto-configure networking
+  • Auto-start containers
+  • Full nested container support
 
 EOF
     exit 0
 fi
 
-# Run main
+# Run
 main
-
 exit 0
