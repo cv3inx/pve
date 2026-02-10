@@ -280,7 +280,7 @@ install_dependencies() {
         export DEBIAN_FRONTEND=noninteractive
         
         apt-get install -y -qq \
-            curl wget vim nano net-tools iputils-ping dnsutils \
+            curl wget vim nano whiptail net-tools iputils-ping dnsutils \
             htop rsync gnupg ca-certificates software-properties-common \
             bridge-utils vlan ifupdown2 2>&1 > /dev/null
         
