@@ -137,6 +137,16 @@ check_requirements() {
         exit 1
     fi
     
+    # Install whiptail if not present
+    if ! command -v whiptail &> /dev/null; then
+        step_info "Installing whiptail..."
+        if command -v apt-get &> /dev/null; then
+            sudo apt-get install -y whiptail -qq &>/dev/null || apt-get install -y whiptail -qq &>/dev/null
+        elif command -v yum &> /dev/null; then
+            sudo yum install -y newt -q &>/dev/null || yum install -y newt -q &>/dev/null
+        fi
+    fi
+    
     if netstat -tuln 2>/dev/null | grep -q ":${PORT} " || ss -tuln 2>/dev/null | grep -q ":${PORT} "; then
         step_error "Port ${PORT} already in use"
         exit 1
@@ -156,6 +166,7 @@ check_existing_container() {
         read -p "  Remove and recreate? [y/N]: " -n 1 -r
         echo ""
         
+        # Default is No - only proceed if explicitly typed 'y' or 'Y'
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             docker stop ${CONTAINER_NAME} &>/dev/null
             docker rm ${CONTAINER_NAME} &>/dev/null
@@ -176,28 +187,95 @@ check_existing_container() {
 deploy_container() {
     step_start "Deploying Proxmox VE ${PROXMOX_VERSION}"
     
-    {
-        docker run -itd \
-            --name ${CONTAINER_NAME} \
-            --hostname ${HOSTNAME} \
-            -p ${PORT}:8006 \
-            --privileged \
-            --cap-add=NET_ADMIN \
-            --cap-add=SYS_ADMIN \
-            --device=/dev/net/tun \
-            -v /var/lib/docker/volumes/pve:/var/lib/pve \
-            -v /var/lib/docker/volumes/vz:/var/lib/vz \
-            ${IMAGE} &>> "$LOG_FILE"
-    } &
+    echo "" >> "$LOG_FILE"
+    echo "=== Docker Pull Output ===" >> "$LOG_FILE"
     
-    spinner $! "Pulling image and creating container..."
-    wait $!
+    # Pull image with detailed progress
+    clear_line
+    echo -e "${CYAN}→${NC} Pulling Docker image: ${IMAGE}"
+    echo ""
+    
+    docker pull ${IMAGE} 2>&1 | tee -a "$LOG_FILE" | while IFS= read -r line; do
+        # Parse pulling status
+        if [[ "$line" =~ "Pulling from" ]]; then
+            clear_line
+            echo -e "${CYAN}→${NC} Pulling from repository..."
+        
+        # Parse layer download progress
+        elif [[ "$line" =~ ([a-f0-9]+):.*Downloading.*\[([=>\ ]+)\].*([0-9.]+[kMG]?B)/([0-9.]+[kMG]?B) ]]; then
+            local layer="${BASH_REMATCH[1]:0:12}"
+            local downloaded="${BASH_REMATCH[3]}"
+            local total="${BASH_REMATCH[4]}"
+            clear_line
+            echo -ne "${CYAN}↓${NC} Downloading layer ${layer}: ${downloaded}/${total}"
+        
+        # Parse extracting status
+        elif [[ "$line" =~ ([a-f0-9]+):.*Extracting.*\[([=>\ ]+)\] ]]; then
+            local layer="${BASH_REMATCH[1]:0:12}"
+            clear_line
+            echo -ne "${YELLOW}⚙${NC} Extracting layer ${layer}..."
+        
+        # Parse pull complete
+        elif [[ "$line" =~ ([a-f0-9]+):.*Pull\ complete ]]; then
+            local layer="${BASH_REMATCH[1]:0:12}"
+            clear_line
+            echo -e "${GREEN}✓${NC} Layer ${layer} complete"
+        
+        # Parse download progress with speed
+        elif [[ "$line" =~ Downloading.*([0-9.]+[kMG]?B/s) ]]; then
+            local speed="${BASH_REMATCH[1]}"
+            clear_line
+            echo -ne "${CYAN}↓${NC} Download speed: ${speed}"
+        
+        # Parse already exists
+        elif [[ "$line" =~ ([a-f0-9]+):.*Already\ exists ]]; then
+            local layer="${BASH_REMATCH[1]:0:12}"
+            clear_line
+            echo -e "${DIM}✓ Layer ${layer} cached${NC}"
+        
+        # Parse digest
+        elif [[ "$line" =~ Digest:\ sha256:([a-f0-9]+) ]]; then
+            local digest="${BASH_REMATCH[1]:0:16}"
+            clear_line
+            echo -e "${CYAN}→${NC} Digest: sha256:${digest}..."
+        
+        # Parse status downloaded
+        elif [[ "$line" =~ Status:.*Downloaded ]]; then
+            clear_line
+            echo -e "${GREEN}✓${NC} Image downloaded successfully"
+        
+        # Parse status up to date
+        elif [[ "$line" =~ Status:.*up\ to\ date ]]; then
+            clear_line
+            echo -e "${GREEN}✓${NC} Image already up to date"
+        fi
+    done
+    
+    echo ""
+    step_done "Image pulled successfully"
+    step_info "Image: ${IMAGE}"
+    
+    # Create container
+    step_start "Creating container"
+    
+    docker run -itd \
+        --name ${CONTAINER_NAME} \
+        --hostname ${HOSTNAME} \
+        -p ${PORT}:8006 \
+        --privileged \
+        --cap-add=NET_ADMIN \
+        --cap-add=SYS_ADMIN \
+        --device=/dev/net/tun \
+        -v /var/lib/docker/volumes/pve:/var/lib/pve \
+        -v /var/lib/docker/volumes/vz:/var/lib/vz \
+        ${IMAGE} &>> "$LOG_FILE"
     
     if [ $? -eq 0 ]; then
-        step_done "Container deployed"
-        step_info "Image: ${IMAGE}"
+        step_done "Container created successfully"
+        step_info "Name: ${CONTAINER_NAME}"
+        step_info "Port: ${PORT}"
     else
-        step_error "Failed to deploy"
+        step_error "Failed to create container"
         exit 1
     fi
     
@@ -280,9 +358,9 @@ install_dependencies() {
         export DEBIAN_FRONTEND=noninteractive
         
         apt-get install -y -qq \
-            curl wget vim nano whiptail net-tools iputils-ping dnsutils \
+            curl wget vim nano net-tools iputils-ping dnsutils \
             htop rsync gnupg ca-certificates software-properties-common \
-            bridge-utils vlan ifupdown2 2>&1 > /dev/null
+            bridge-utils vlan ifupdown2 whiptail dialog 2>&1 > /dev/null
         
         apt-get install -y -qq \
             lxc lxcfs lxc-templates debootstrap 2>&1 > /dev/null
@@ -293,7 +371,7 @@ install_dependencies() {
     ' &>> "$LOG_FILE"
     
     step_done "Dependencies installed"
-    step_info "LXC, networking, and tools ready"
+    step_info "LXC, networking, whiptail, and tools ready"
 }
 
 setup_lxc_support() {
@@ -696,8 +774,10 @@ main() {
     
     read -p "Continue? [Y/n]: " -n 1 -r
     echo ""
+    echo ""
     
-    if [[ ! $REPLY =~ ^[Yy]$ ]] && [[ -n $REPLY ]]; then
+    # Default is Yes - only cancel if explicitly typed 'n' or 'N'
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
         echo -e "${RED}✗${NC} Cancelled"
         exit 0
     fi
