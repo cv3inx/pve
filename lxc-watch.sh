@@ -142,18 +142,36 @@ ensure_config() {
     
     [[ ! -f "$config_file" ]] && return 1
     
-    if ! grep -q "^lxc.apparmor.profile=unconfined" "$config_file"; then
-        [[ ! -f "${config_file}.bak.original" ]] && cp "$config_file" "${config_file}.bak.original"
-        
-        grep -v "apparmor" "$config_file" > "${config_file}.tmp"
-        echo "" >> "${config_file}.tmp"
-        echo "# Auto-configured for nested containers - $(date '+%Y-%m-%d %H:%M:%S')" >> "${config_file}.tmp"
-        echo "lxc.apparmor.profile=unconfined" >> "${config_file}.tmp"
-        mv "${config_file}.tmp" "$config_file"
-        
-        return 0
+    # Check if properly configured
+    if grep -q "^lxc.apparmor.profile\s*=\s*unconfined" "$config_file" && \
+       grep -q "^lxc.apparmor.allow_incomplete\s*=\s*1" "$config_file"; then
+        return 1  # Already configured
     fi
-    return 1
+    
+    # Create backup
+    [[ ! -f "${config_file}.bak.original" ]] && cp "$config_file" "${config_file}.bak.original"
+    
+    # Remove ALL apparmor-related lines (more aggressive)
+    grep -v -i "apparmor" "$config_file" | grep -v "^lxc.aa_" > "${config_file}.tmp"
+    
+    # Add complete AppArmor disable configuration
+    cat >> "${config_file}.tmp" << 'EOFCONFIG'
+
+# Auto-configured for nested containers - Full AppArmor disable
+lxc.apparmor.profile = unconfined
+lxc.apparmor.allow_incomplete = 1
+EOFCONFIG
+    
+    # Atomic replace
+    mv "${config_file}.tmp" "$config_file"
+    
+    # Remove AppArmor directory if exists (prevent old profiles from loading)
+    local apparmor_dir="$LXC_DIR/$ct_id/apparmor"
+    if [[ -d "$apparmor_dir" ]]; then
+        rm -rf "$apparmor_dir"
+    fi
+    
+    return 0
 }
 
 start_container() {
@@ -197,7 +215,9 @@ configure_container() {
     
     set_processing "$ct_id"
     
-    if grep -q "^lxc.apparmor.profile=unconfined" "$config_file"; then
+    # Check if properly configured
+    if grep -q "^lxc.apparmor.profile\s*=\s*unconfined" "$config_file" && \
+       grep -q "^lxc.apparmor.allow_incomplete\s*=\s*1" "$config_file"; then
         log_message "SKIP" "CT $ct_id already configured"
         clear_processing "$ct_id"
         return 0
@@ -213,13 +233,29 @@ configure_container() {
         sleep 1
     fi
     
+    # Create backup
     [[ ! -f "${config_file}.bak.original" ]] && cp "$config_file" "${config_file}.bak.original"
     
-    grep -v "apparmor" "$config_file" > "${config_file}.tmp"
-    echo "" >> "${config_file}.tmp"
-    echo "# Auto-configured for nested containers - $(date '+%Y-%m-%d %H:%M:%S')" >> "${config_file}.tmp"
-    echo "lxc.apparmor.profile=unconfined" >> "${config_file}.tmp"
+    # Remove ALL apparmor-related lines (case-insensitive, include lxc.aa_ variants)
+    grep -v -i "apparmor" "$config_file" | grep -v "^lxc.aa_" > "${config_file}.tmp"
+    
+    # Add complete AppArmor disable configuration
+    cat >> "${config_file}.tmp" << 'EOFCONFIG'
+
+# Auto-configured for nested containers - Full AppArmor disable
+lxc.apparmor.profile = unconfined
+lxc.apparmor.allow_incomplete = 1
+EOFCONFIG
+    
+    # Atomic replace
     mv "${config_file}.tmp" "$config_file"
+    
+    # Remove AppArmor directory if exists (prevent old profiles)
+    local apparmor_dir="$LXC_DIR/$ct_id/apparmor"
+    if [[ -d "$apparmor_dir" ]]; then
+        rm -rf "$apparmor_dir"
+        log_message "INFO" "Removed old AppArmor profiles for CT $ct_id"
+    fi
     
     log_message "SUCCESS" "CT $ct_id configured"
     
@@ -348,7 +384,9 @@ for ct_dir in "$LXC_DIR"/*/; do
         if [[ -f "$config_file" ]]; then
             ((container_count++))
             
-            if ! grep -q "^lxc.apparmor.profile=unconfined" "$config_file"; then
+            # Check if properly configured with both lines
+            if ! grep -q "^lxc.apparmor.profile\s*=\s*unconfined" "$config_file" || \
+               ! grep -q "^lxc.apparmor.allow_incomplete\s*=\s*1" "$config_file"; then
                 configure_container "$ct_id"
                 ((configured_count++))
             else
