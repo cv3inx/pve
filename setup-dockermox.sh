@@ -148,6 +148,7 @@ if [ "${SKIP_CREATE}" != "true" ]; then
         --hostname "${HOSTNAME}" \
         -p "${PORT}:8006" \
         --privileged \
+        --restart unless-stopped \
         "${IMAGE}"
 
     success "Container '${CONTAINER_NAME}' berhasil dijalankan!"
