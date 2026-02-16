@@ -166,26 +166,24 @@ fi
 # ══════════════════════════════════════════════════════════════
 step "4/7" "Menunggu container siap"
 
-info "Menunggu systemd di dalam container aktif..."
-MAX_WAIT=60
+info "Menunggu Proxmox VE ready (detect dari docker logs)..."
+MAX_WAIT=120
 WAITED=0
 while [ $WAITED -lt $MAX_WAIT ]; do
-    if docker exec "${CONTAINER_NAME}" systemctl is-system-running &> /dev/null; then
-        STATUS=$(docker exec "${CONTAINER_NAME}" systemctl is-system-running 2>/dev/null || true)
-        if [ "$STATUS" == "running" ] || [ "$STATUS" == "degraded" ]; then
-            break
-        fi
+    if docker logs "${CONTAINER_NAME}" 2>&1 | grep -q "connect to:"; then
+        break
     fi
-    sleep 2
-    WAITED=$((WAITED + 2))
+    sleep 3
+    WAITED=$((WAITED + 3))
     echo -ne "\r  Menunggu... ${WAITED}s / ${MAX_WAIT}s"
 done
 echo ""
 
 if [ $WAITED -ge $MAX_WAIT ]; then
-    warn "Container belum fully ready, tapi tetap melanjutkan setup..."
+    warn "Timeout menunggu container ready, tetap melanjutkan..."
 else
-    success "Container siap! (${WAITED}s)"
+    PVE_URL=$(docker logs "${CONTAINER_NAME}" 2>&1 | grep "connect to:" | tail -1 | grep -oP 'https://[^ ]+' || echo "https://localhost:${PORT}")
+    success "Proxmox VE ready! (${WAITED}s) → ${PVE_URL}"
 fi
 
 # ══════════════════════════════════════════════════════════════
